@@ -4,30 +4,21 @@ import { eq } from 'drizzle-orm'
 import { db } from '../db/client.js'
 import { users, apiKeys, subscriptions } from '../db/schema.js'
 import { supabaseAdmin } from '../lib/supabase.js'
-import { verifySupabaseJwt } from '../lib/jwt.js'
 
 export async function keysRoutes(app: FastifyInstance) {
   app.post('/v1/keys', async (req, reply) => {
-    // Verify Supabase JWT
     const authHeader = req.headers.authorization
     if (!authHeader?.startsWith('Bearer ')) {
       return reply.status(401).send({ error: 'missing_token' })
     }
     const token = authHeader.slice(7)
 
-    let sub: string
-    try {
-      const payload = verifySupabaseJwt(token)
-      sub = payload.sub
-    } catch {
+    // Validate token + get fresh user data in one call (handles RS256 and legacy HS256)
+    const { data: { user }, error } = await supabaseAdmin.auth.getUser(token)
+    if (error || !user) {
       return reply.status(401).send({ error: 'invalid_token' })
     }
-
-    // Fetch fresh user — don't trust stale JWT claims for user_metadata
-    const { data: { user }, error } = await supabaseAdmin.auth.admin.getUserById(sub)
-    if (error || !user) {
-      return reply.status(401).send({ error: 'user_not_found' })
-    }
+    const sub = user.id
 
     // Idempotent: return existing key immediately
     if (user.user_metadata?.api_key) {
