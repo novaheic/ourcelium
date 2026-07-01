@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm'
 import { db } from '../db/client.js'
 import { users, apiKeys, subscriptions } from '../db/schema.js'
 import { supabaseAdmin } from '../lib/supabase.js'
+import { stripe } from '../lib/stripe.js'
 
 export async function keysRoutes(app: FastifyInstance) {
   app.post('/v1/keys', async (req, reply) => {
@@ -13,7 +14,7 @@ export async function keysRoutes(app: FastifyInstance) {
     }
     const token = authHeader.slice(7)
 
-    // Validate token + get fresh user data in one call (handles RS256 and legacy HS256)
+    // Validate token + get fresh user data (handles RS256 and legacy HS256)
     const { data: { user }, error } = await supabaseAdmin.auth.getUser(token)
     if (error || !user) {
       return reply.status(401).send({ error: 'invalid_token' })
@@ -35,6 +36,19 @@ export async function keysRoutes(app: FastifyInstance) {
       })
       .returning()
 
+    // Create Stripe customer if this user doesn't have one yet
+    if (!userRecord.stripeCustomerId) {
+      const customer = await stripe.customers.create({
+        email: user.email!,
+        metadata: { ourcelium_user_id: String(userRecord.id) },
+      })
+      await db
+        .update(users)
+        .set({ stripeCustomerId: customer.id })
+        .where(eq(users.id, userRecord.id))
+      userRecord.stripeCustomerId = customer.id
+    }
+
     // Create free subscription if one doesn't exist yet
     const [existingSub] = await db
       .select({ id: subscriptions.id })
@@ -44,14 +58,15 @@ export async function keysRoutes(app: FastifyInstance) {
 
     if (!existingSub) {
       const now = new Date()
-      const periodEnd = new Date(now)
-      periodEnd.setMonth(periodEnd.getMonth() + 1)
+      // Use day-of-month capped at 28 to avoid month-rollover bugs in shorter months
+      const anchor = Math.min(now.getDate(), 28)
+      const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, anchor)
       await db.insert(subscriptions).values({
         userId: userRecord.id,
         tier: 'free',
         periodStart: now,
         periodEnd,
-        periodResetAnchor: Math.min(now.getDate(), 28),
+        periodResetAnchor: anchor,
       })
     }
 
@@ -66,7 +81,7 @@ export async function keysRoutes(app: FastifyInstance) {
       })
       return reply.send({ key })
     } catch (err: any) {
-      // Unique constraint on user_id: concurrent request won the race
+      // Unique constraint on user_id: a concurrent request won the race
       if (err.code === '23505') {
         const { data: { user: freshUser } } = await supabaseAdmin.auth.admin.getUserById(sub)
         return reply.send({ key: freshUser!.user_metadata.api_key })

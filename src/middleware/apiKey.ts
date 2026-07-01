@@ -11,6 +11,8 @@ declare module 'fastify' {
       tier: 'free' | 'paid'
       creditsTokens: number
       usingCredits: boolean
+      periodStart: Date
+      periodEnd: Date
     } | null
   }
 }
@@ -19,8 +21,12 @@ export function applyApiKeyMiddleware(app: FastifyInstance) {
   app.decorateRequest('user', null)
 
   app.addHook('preHandler', async (req, reply) => {
-    // Only protect /v1/* — skip the key issuance endpoint itself
-    if (!req.url.startsWith('/v1/') || req.url === '/v1/keys') return
+    // Skip auth for these endpoints — they use their own auth schemes
+    if (
+      !req.url.startsWith('/v1/') ||
+      req.url === '/v1/keys' ||
+      req.url.startsWith('/v1/webhooks/')
+    ) return
 
     const authHeader = req.headers.authorization
     if (!authHeader?.startsWith('Bearer ')) {
@@ -44,6 +50,8 @@ export function applyApiKeyMiddleware(app: FastifyInstance) {
         id: users.id,
         creditsTokens: users.creditsTokens,
         tier: subscriptions.tier,
+        periodStart: subscriptions.periodStart,
+        periodEnd: subscriptions.periodEnd,
       })
       .from(users)
       .innerJoin(subscriptions, eq(subscriptions.userId, users.id))
@@ -54,7 +62,7 @@ export function applyApiKeyMiddleware(app: FastifyInstance) {
       return reply.status(401).send({ error: 'invalid_api_key' })
     }
 
-    // Non-blocking last_used_at update — don't slow down the request
+    // Non-blocking last_used_at update
     db.update(apiKeys)
       .set({ lastUsedAt: new Date() })
       .where(eq(apiKeys.id, keyRecord.id))
@@ -66,6 +74,8 @@ export function applyApiKeyMiddleware(app: FastifyInstance) {
       tier: userRecord.tier as 'free' | 'paid',
       creditsTokens: userRecord.creditsTokens,
       usingCredits: false,
+      periodStart: userRecord.periodStart,
+      periodEnd: userRecord.periodEnd,
     }
   })
 }

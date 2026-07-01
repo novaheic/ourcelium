@@ -1,10 +1,13 @@
 import type { FastifyInstance } from 'fastify'
-import { eq, sql } from 'drizzle-orm'
+import { and, eq, gte, sql } from 'drizzle-orm'
 import { db } from '../db/client.js'
 import { usageEvents, users } from '../db/schema.js'
 
 const TOGETHER_API_URL = 'https://api.together.xyz/v1/chat/completions'
 const DEFAULT_MODEL = 'Qwen/Qwen3-235B-A22B-Instruct-2507-tput'
+
+const FREE_CAP = 2_000_000
+const PAID_CAP = 25_000_000
 
 interface CompletionBody {
   model?: string
@@ -14,6 +17,59 @@ interface CompletionBody {
 export async function completionsRoutes(app: FastifyInstance) {
   app.post('/v1/chat/completions', async (req, reply) => {
     const user = req.user!
+    const cap = user.tier === 'free' ? FREE_CAP : PAID_CAP
+
+    // --- Cap enforcement (before proxying) ---
+    const [usageRow] = await db
+      .select({ total: sql<number>`COALESCE(SUM(input_tokens + output_tokens), 0)` })
+      .from(usageEvents)
+      .where(
+        and(
+          eq(usageEvents.userId, user.id),
+          gte(usageEvents.createdAt, user.periodStart),
+        ),
+      )
+
+    const usedTokens = Number(usageRow.total)
+
+    if (usedTokens >= cap) {
+      if (user.tier === 'free') {
+        return reply
+          .status(429)
+          .header('Retry-After', Math.ceil((user.periodEnd.getTime() - Date.now()) / 1000))
+          .send({
+            error: 'usage_limit_reached',
+            reset_at: user.periodEnd.toISOString(),
+            action_url: 'https://ourcelium.dev/pricing',
+          })
+      }
+      // Paid: allow if credits available, else 429
+      if (user.creditsTokens > 0) {
+        user.usingCredits = true
+      } else {
+        return reply
+          .status(429)
+          .header('Retry-After', Math.ceil((user.periodEnd.getTime() - Date.now()) / 1000))
+          .send({
+            error: 'usage_limit_reached',
+            reset_at: user.periodEnd.toISOString(),
+            action_url: 'https://ourcelium.dev/dashboard',
+          })
+      }
+    }
+
+    // Abuse detection: >90% of cap consumed within 48h of period start
+    if (usedTokens >= cap * 0.9) {
+      const periodAgeMs = Date.now() - user.periodStart.getTime()
+      if (periodAgeMs < 48 * 60 * 60 * 1000) {
+        req.log.warn(
+          { userId: user.id, usedTokens, cap, periodAgeHours: periodAgeMs / 3_600_000 },
+          'suspicious_usage',
+        )
+      }
+    }
+
+    // --- Proxy ---
     const body = req.body as CompletionBody
 
     const upstream = await fetch(TOGETHER_API_URL, {
@@ -57,7 +113,7 @@ export async function completionsRoutes(app: FastifyInstance) {
         const text = decoder.decode(value, { stream: true })
         buffer += text
 
-        // Process complete SSE lines to extract usage from the final chunk
+        // Extract usage from SSE chunks — Together sends it on the final chunk
         const lines = buffer.split('\n')
         buffer = lines.pop() ?? ''
         for (const line of lines) {
