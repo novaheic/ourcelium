@@ -65,9 +65,20 @@ export async function keysRoutes(app: FastifyInstance) {
       })
     }
 
-    // Idempotent: key already exists, return it now that DB rows are guaranteed
+    // If a key exists in user_metadata, verify it's actually in this DB.
+    // It won't be if the user previously signed in against a different DB (e.g. local dev Docker).
     if (user.user_metadata?.api_key) {
-      return reply.send({ key: user.user_metadata.api_key })
+      const existingKey = user.user_metadata.api_key
+      const existingHash = crypto.createHash('sha256').update(existingKey).digest('hex')
+      const [keyRecord] = await db
+        .select({ id: apiKeys.id })
+        .from(apiKeys)
+        .where(eq(apiKeys.keyHash, existingHash))
+        .limit(1)
+      if (keyRecord) {
+        return reply.send({ key: existingKey })
+      }
+      // Key not in DB — fall through to generate and store a fresh one
     }
 
     // Generate key — orc_ prefix makes it identifiable in logs
