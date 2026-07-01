@@ -21,12 +21,8 @@ export async function keysRoutes(app: FastifyInstance) {
     }
     const sub = user.id
 
-    // Idempotent: return existing key immediately
-    if (user.user_metadata?.api_key) {
-      return reply.send({ key: user.user_metadata.api_key })
-    }
-
-    // Upsert user row
+    // Always upsert user + subscription rows — ensures DB is consistent even
+    // if user_metadata was set from a different environment (e.g. local dev)
     const [userRecord] = await db
       .insert(users)
       .values({ supabaseUserId: sub, email: user.email! })
@@ -58,7 +54,6 @@ export async function keysRoutes(app: FastifyInstance) {
 
     if (!existingSub) {
       const now = new Date()
-      // Use day-of-month capped at 28 to avoid month-rollover bugs in shorter months
       const anchor = Math.min(now.getDate(), 28)
       const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, anchor)
       await db.insert(subscriptions).values({
@@ -68,6 +63,11 @@ export async function keysRoutes(app: FastifyInstance) {
         periodEnd,
         periodResetAnchor: anchor,
       })
+    }
+
+    // Idempotent: key already exists, return it now that DB rows are guaranteed
+    if (user.user_metadata?.api_key) {
+      return reply.send({ key: user.user_metadata.api_key })
     }
 
     // Generate key — orc_ prefix makes it identifiable in logs
