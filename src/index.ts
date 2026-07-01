@@ -1,5 +1,6 @@
 import Fastify from 'fastify'
 import rateLimit from '@fastify/rate-limit'
+import { keysRoutes } from './routes/keys.js'
 
 const app = Fastify({ logger: true })
 
@@ -8,6 +9,8 @@ await app.register(rateLimit, {
   timeWindow: '1 minute',
   keyGenerator: (req) => req.headers['x-api-key-hash'] as string ?? req.ip,
 })
+
+await app.register(keysRoutes)
 
 app.get('/health', async () => ({ status: 'ok' }))
 
