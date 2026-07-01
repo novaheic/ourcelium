@@ -79,7 +79,10 @@ export async function completionsRoutes(app: FastifyInstance) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: body.model ?? DEFAULT_MODEL,
+        // Phase 0 is single-model: always use the gateway's model regardless
+        // of what the client sends, so arbitrary Together models can't be
+        // billed to our upstream account.
+        model: DEFAULT_MODEL,
         messages: body.messages,
         stream: true,
         stream_options: { include_usage: true },
@@ -139,7 +142,7 @@ export async function completionsRoutes(app: FastifyInstance) {
       const totalTokens = inputTokens + outputTokens
       if (totalTokens > 0) {
         db.insert(usageEvents)
-          .values({ userId: user.id, inputTokens, outputTokens, model: body.model ?? DEFAULT_MODEL })
+          .values({ userId: user.id, inputTokens, outputTokens, model: DEFAULT_MODEL })
           .execute()
           .catch(console.error)
 
