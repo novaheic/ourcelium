@@ -15,7 +15,7 @@ declare module 'fastify' {
   }
 }
 
-export async function apiKeyMiddleware(app: FastifyInstance) {
+export function applyApiKeyMiddleware(app: FastifyInstance) {
   app.decorateRequest('user', null)
 
   app.addHook('preHandler', async (req, reply) => {

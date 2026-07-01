@@ -1,9 +1,10 @@
 import crypto from 'crypto'
 import Fastify from 'fastify'
 import rateLimit from '@fastify/rate-limit'
-import { apiKeyMiddleware } from './middleware/apiKey.js'
+import { applyApiKeyMiddleware } from './middleware/apiKey.js'
 import { keysRoutes } from './routes/keys.js'
 import { completionsRoutes } from './routes/completions.js'
+import { usageRoutes } from './routes/usage.js'
 
 const app = Fastify({ logger: true })
 
@@ -23,9 +24,12 @@ await app.register(rateLimit, {
   }),
 })
 
-await app.register(apiKeyMiddleware)
+// Applied directly on root so the hook covers all route plugins
+applyApiKeyMiddleware(app)
+
 await app.register(keysRoutes)
 await app.register(completionsRoutes)
+await app.register(usageRoutes)
 
 app.get('/health', async () => ({ status: 'ok' }))
 
