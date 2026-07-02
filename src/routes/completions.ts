@@ -9,9 +9,22 @@ const DEFAULT_MODEL = 'Qwen/Qwen3-235B-A22B-Instruct-2507-tput'
 const FREE_CAP = 2_000_000
 const PAID_CAP = 25_000_000
 
+interface ToolCall {
+  id?: string
+  type?: string
+  function?: { name?: string; arguments?: string }
+}
+
+interface Message {
+  role: string
+  content: unknown
+  tool_calls?: ToolCall[]
+  tool_call_id?: string
+}
+
 interface CompletionBody {
   model?: string
-  messages: { role: string; content: string }[]
+  messages: Message[]
   // Tool-calling params from the client. These MUST be forwarded upstream or
   // the model never learns the edit/create tools exist and can only describe
   // changes in prose instead of applying them.
@@ -19,6 +32,33 @@ interface CompletionBody {
   tool_choice?: unknown
   temperature?: number
   max_tokens?: number
+}
+
+// If the model's output is truncated (e.g. it hits max_tokens mid-edit) or it
+// simply emits malformed tool-call JSON, the assistant message ends up with a
+// `tool_calls[].function.arguments` string that isn't valid JSON. Together then
+// rejects the ENTIRE request with "Input validation error" — which poisons the
+// whole session, since that bad message stays in history and every subsequent
+// request 400s. Repair such arguments to "{}" so the conversation stays valid;
+// the paired tool result (usually an error the client already recorded) lets
+// the model recover on the next turn.
+function sanitizeToolCallArguments(messages: Message[]): Message[] {
+  return messages.map((msg) => {
+    if (msg.role !== 'assistant' || !Array.isArray(msg.tool_calls)) return msg
+    let repaired = false
+    const tool_calls = msg.tool_calls.map((tc) => {
+      const args = tc.function?.arguments
+      if (typeof args !== 'string') return tc
+      try {
+        JSON.parse(args)
+        return tc
+      } catch {
+        repaired = true
+        return { ...tc, function: { ...tc.function, arguments: '{}' } }
+      }
+    })
+    return repaired ? { ...msg, tool_calls } : msg
+  })
 }
 
 export async function completionsRoutes(app: FastifyInstance) {
@@ -82,6 +122,13 @@ export async function completionsRoutes(app: FastifyInstance) {
     // --- Proxy ---
     const body = req.body as CompletionBody
 
+    const messages = sanitizeToolCallArguments(body.messages)
+    // sanitize returns the same message object when nothing was repaired, so an
+    // identity diff on any element means we fixed a malformed tool call.
+    if (messages.some((m, i) => m !== body.messages[i])) {
+      req.log.warn({ userId: user.id }, 'repaired_malformed_tool_call_arguments')
+    }
+
     const upstreamStart = Date.now()
     const upstream = await fetch(TOGETHER_API_URL, {
       method: 'POST',
@@ -94,7 +141,7 @@ export async function completionsRoutes(app: FastifyInstance) {
         // of what the client sends, so arbitrary Together models can't be
         // billed to our upstream account.
         model: DEFAULT_MODEL,
-        messages: body.messages,
+        messages,
         // Forward tool definitions so the model can actually call the
         // edit/create tools the client offers. Without this the agent can
         // only suggest changes, never apply them.
