@@ -2,7 +2,6 @@ import crypto from 'crypto'
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
-import pino from 'pino'
 import { sql } from 'drizzle-orm'
 import { db } from './db/client.js'
 import { applyApiKeyMiddleware } from './middleware/apiKey.js'
@@ -20,9 +19,9 @@ function buildLogger() {
   if (!AXIOM_TOKEN || !AXIOM_DATASET) {
     return true
   }
-  return pino(
-    { level: 'info' },
-    pino.transport({
+  return {
+    level: 'info',
+    transport: {
       targets: [
         { target: 'pino/file', options: { destination: 1 } },
         {
@@ -30,8 +29,8 @@ function buildLogger() {
           options: { dataset: AXIOM_DATASET, token: AXIOM_TOKEN },
         },
       ],
-    }),
-  )
+    },
+  }
 }
 
 const app = Fastify({ logger: buildLogger() })

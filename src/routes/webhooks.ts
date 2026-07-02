@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify'
+import type { FastifyBaseLogger, FastifyInstance } from 'fastify'
 import { eq, sql } from 'drizzle-orm'
 import type Stripe from 'stripe'
 import { db } from '../db/client.js'
@@ -52,7 +52,7 @@ async function downgradeBySubId(stripeSubId: string) {
     .where(eq(subscriptions.stripeSubId, stripeSubId))
 }
 
-async function handleTopup(session: Stripe.Checkout.Session) {
+async function handleTopup(session: Stripe.Checkout.Session, log: FastifyBaseLogger) {
   const userId = parseInt(session.client_reference_id!, 10)
   if (isNaN(userId)) return
 
@@ -67,6 +67,18 @@ async function handleTopup(session: Stripe.Checkout.Session) {
     .update(users)
     .set({ creditsTokens: sql`${users.creditsTokens} + ${tokens}` })
     .where(eq(users.id, userId))
+
+  // Structured revenue event — powers the top-up revenue dashboard panel.
+  log.info(
+    {
+      user_id: userId,
+      pack: session.metadata?.pack ?? null,
+      tokens,
+      amount_cents: session.amount_total ?? null,
+      currency: session.currency ?? null,
+    },
+    'topup',
+  )
 }
 
 export async function webhookRoutes(app: FastifyInstance) {
@@ -137,7 +149,7 @@ export async function webhookRoutes(app: FastifyInstance) {
                 .where(eq(users.id, userId))
             }
           } else if (session.mode === 'payment') {
-            await handleTopup(session)
+            await handleTopup(session, req.log)
           }
           break
         }
