@@ -22,14 +22,26 @@ async function handleSubscriptionUpdate(sub: Stripe.Subscription) {
 
   if (!userRecord) return
 
-  const periodStart = new Date(sub.current_period_start * 1000)
-  const periodEnd = new Date(sub.current_period_end * 1000)
   const tier: 'free' | 'paid' =
     sub.status === 'active' || sub.status === 'trialing' ? 'paid' : 'free'
 
+  // current_period_start/end moved from the subscription root onto the
+  // subscription item in newer Stripe API versions. Webhook event payloads are
+  // rendered at the account's API version (item-level), while SDK retrievals
+  // may still expose the root fields — so read the item first, fall back to
+  // root, and never write an invalid date if neither is present.
+  const subAny = sub as any
+  const startTs = subAny.items?.data?.[0]?.current_period_start ?? subAny.current_period_start
+  const endTs = subAny.items?.data?.[0]?.current_period_end ?? subAny.current_period_end
+
   await db
     .update(subscriptions)
-    .set({ tier, periodStart, periodEnd, stripeSubId: sub.id })
+    .set({
+      tier,
+      stripeSubId: sub.id,
+      ...(startTs != null ? { periodStart: new Date(startTs * 1000) } : {}),
+      ...(endTs != null ? { periodEnd: new Date(endTs * 1000) } : {}),
+    })
     .where(eq(subscriptions.userId, userRecord.id))
 }
 

@@ -2,6 +2,7 @@ import crypto from 'crypto'
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
+import pino from 'pino'
 import { sql } from 'drizzle-orm'
 import { db } from './db/client.js'
 import { applyApiKeyMiddleware } from './middleware/apiKey.js'
@@ -11,7 +12,29 @@ import { usageRoutes } from './routes/usage.js'
 import { billingRoutes } from './routes/billing.js'
 import { webhookRoutes } from './routes/webhooks.js'
 
-const app = Fastify({ logger: true })
+// When AXIOM_TOKEN + AXIOM_DATASET are set, ship structured logs to Axiom while
+// still writing JSON to stdout (Railway's own log capture). Without them, fall
+// back to plain stdout logging — so nothing breaks before Axiom is configured.
+function buildLogger() {
+  const { AXIOM_TOKEN, AXIOM_DATASET } = process.env
+  if (!AXIOM_TOKEN || !AXIOM_DATASET) {
+    return true
+  }
+  return pino(
+    { level: 'info' },
+    pino.transport({
+      targets: [
+        { target: 'pino/file', options: { destination: 1 } },
+        {
+          target: '@axiomhq/pino',
+          options: { dataset: AXIOM_DATASET, token: AXIOM_TOKEN },
+        },
+      ],
+    }),
+  )
+}
+
+const app = Fastify({ logger: buildLogger() })
 
 await app.register(cors, {
   origin: [
@@ -40,6 +63,29 @@ await app.register(rateLimit, {
 
 // Applied on root so the hook covers all route plugins
 applyApiKeyMiddleware(app)
+
+// Structured per-request access log with business fields. Fires for every
+// non-hijacked request (keys, usage, billing, webhooks, and completions'
+// cap/error early returns). Streaming completions hijack the reply and log
+// their own richer line (with token counts + latencies) in completions.ts.
+app.addHook('onResponse', async (req, reply) => {
+  // Skip health checks, and skip streamed completions — they emit their own
+  // richer 'completion' log line (onResponse still fires for hijacked replies).
+  if (req.url === '/health' || req.skipAccessLog) return
+  const u = req.user
+  req.log.info(
+    {
+      user_id: u?.id ?? null,
+      tier: u?.tier ?? null,
+      using_credits: u?.usingCredits ?? false,
+      status_code: reply.statusCode,
+      method: req.method,
+      url: req.url,
+      latency_ms: Math.round(reply.elapsedTime),
+    },
+    'request',
+  )
+})
 
 // Webhook plugin must come before other JSON routes — it registers its own
 // raw-body content type parser scoped to this plugin only

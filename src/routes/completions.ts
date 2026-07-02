@@ -12,11 +12,19 @@ const PAID_CAP = 25_000_000
 interface CompletionBody {
   model?: string
   messages: { role: string; content: string }[]
+  // Tool-calling params from the client. These MUST be forwarded upstream or
+  // the model never learns the edit/create tools exist and can only describe
+  // changes in prose instead of applying them.
+  tools?: unknown
+  tool_choice?: unknown
+  temperature?: number
+  max_tokens?: number
 }
 
 export async function completionsRoutes(app: FastifyInstance) {
   app.post('/v1/chat/completions', async (req, reply) => {
     const user = req.user!
+    const handlerStart = Date.now()
     const cap = user.tier === 'free' ? FREE_CAP : PAID_CAP
 
     // --- Cap enforcement (before proxying) ---
@@ -40,7 +48,8 @@ export async function completionsRoutes(app: FastifyInstance) {
           .send({
             error: 'usage_limit_reached',
             reset_at: user.periodEnd.toISOString(),
-            action_url: 'https://ourcelium.dev/pricing',
+            cta: 'upgrade',
+            action_url: 'https://ourcelium.dev/dashboard',
           })
       }
       // Paid: allow if credits available, else 429
@@ -53,6 +62,7 @@ export async function completionsRoutes(app: FastifyInstance) {
           .send({
             error: 'usage_limit_reached',
             reset_at: user.periodEnd.toISOString(),
+            cta: 'topup',
             action_url: 'https://ourcelium.dev/dashboard',
           })
       }
@@ -72,6 +82,7 @@ export async function completionsRoutes(app: FastifyInstance) {
     // --- Proxy ---
     const body = req.body as CompletionBody
 
+    const upstreamStart = Date.now()
     const upstream = await fetch(TOGETHER_API_URL, {
       method: 'POST',
       headers: {
@@ -84,16 +95,26 @@ export async function completionsRoutes(app: FastifyInstance) {
         // billed to our upstream account.
         model: DEFAULT_MODEL,
         messages: body.messages,
+        // Forward tool definitions so the model can actually call the
+        // edit/create tools the client offers. Without this the agent can
+        // only suggest changes, never apply them.
+        ...(body.tools ? { tools: body.tools, tool_choice: body.tool_choice ?? 'auto' } : {}),
+        ...(body.temperature !== undefined ? { temperature: body.temperature } : {}),
+        ...(body.max_tokens !== undefined ? { max_tokens: body.max_tokens } : {}),
         stream: true,
         stream_options: { include_usage: true },
       }),
     })
+    const upstreamLatencyMs = Date.now() - upstreamStart
 
     if (!upstream.ok) {
       const detail = await upstream.text()
       return reply.status(upstream.status).send({ error: 'upstream_error', detail })
     }
 
+    // This request emits its own 'completion' log below; tell the global
+    // onResponse access-log hook to skip it (it fires for hijacked replies too).
+    req.skipAccessLog = true
     reply.hijack()
     const res = reply.raw
     res.writeHead(200, {
@@ -107,6 +128,7 @@ export async function completionsRoutes(app: FastifyInstance) {
     let buffer = ''
     let inputTokens = 0
     let outputTokens = 0
+    let ttftMs: number | null = null
 
     try {
       while (true) {
@@ -114,6 +136,9 @@ export async function completionsRoutes(app: FastifyInstance) {
         if (done) break
 
         const text = decoder.decode(value, { stream: true })
+        if (ttftMs === null && text.length > 0) {
+          ttftMs = Date.now() - handlerStart
+        }
         buffer += text
 
         // Extract usage from SSE chunks — Together sends it on the final chunk
@@ -154,6 +179,23 @@ export async function completionsRoutes(app: FastifyInstance) {
             .catch(console.error)
         }
       }
+
+      // Structured per-completion metrics. Emitted here (not via the global
+      // onResponse hook) because the streaming reply is hijacked, so Fastify's
+      // response lifecycle hooks don't fire for it.
+      req.log.info(
+        {
+          user_id: user.id,
+          tier: user.tier,
+          using_credits: user.usingCredits,
+          input_tokens: inputTokens,
+          output_tokens: outputTokens,
+          ttft_ms: ttftMs,
+          upstream_latency_ms: upstreamLatencyMs,
+          status_code: 200,
+        },
+        'completion',
+      )
     }
   })
 }

@@ -14,6 +14,9 @@ declare module 'fastify' {
       periodStart: Date
       periodEnd: Date
     } | null
+    // Set by the completions route once it emits its own 'completion' log, so
+    // the global onResponse access-log hook doesn't log a redundant line.
+    skipAccessLog?: boolean
   }
 }
 

@@ -92,10 +92,25 @@ export async function keysRoutes(app: FastifyInstance) {
       })
       return reply.send({ key })
     } catch (err: any) {
-      // Unique constraint on user_id: a concurrent request won the race
+      // Unique constraint on user_id: a concurrent request won the race and
+      // created the key. The plaintext key lives only in Supabase user_metadata
+      // (the DB stores just the hash), so we must read it back from there. The
+      // winner writes that metadata *after* inserting the key row, so at the
+      // instant we land here it may not be set yet — retry briefly until it is,
+      // rather than returning a blank key.
       if (err.code === '23505') {
-        const { data: { user: freshUser } } = await supabaseAdmin.auth.admin.getUserById(sub)
-        return reply.send({ key: freshUser!.user_metadata.api_key })
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const { data: { user: freshUser } } = await supabaseAdmin.auth.admin.getUserById(sub)
+          const racedKey = freshUser?.user_metadata?.api_key
+          if (racedKey) {
+            return reply.send({ key: racedKey })
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100))
+        }
+        // The winner always sets metadata immediately after inserting the key
+        // row, so this is effectively unreachable — surface a retryable error
+        // instead of handing back an undefined key.
+        return reply.status(503).send({ error: 'key_issuance_conflict' })
       }
       throw err
     }
