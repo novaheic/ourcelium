@@ -10,6 +10,7 @@ import { completionsRoutes } from './routes/completions.js'
 import { usageRoutes } from './routes/usage.js'
 import { billingRoutes } from './routes/billing.js'
 import { webhookRoutes } from './routes/webhooks.js'
+import { adminRoutes } from './routes/admin.js'
 
 // When AXIOM_TOKEN + AXIOM_DATASET are set, ship structured logs to Axiom while
 // still writing JSON to stdout (Railway's own log capture). Without them, fall
@@ -94,6 +95,7 @@ await app.register(keysRoutes)
 await app.register(completionsRoutes)
 await app.register(usageRoutes)
 await app.register(billingRoutes)
+await app.register(adminRoutes)
 
 app.get('/health', async () => ({ status: 'ok' }))
 
