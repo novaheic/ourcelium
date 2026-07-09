@@ -4,7 +4,7 @@ import { db } from '../db/client.js'
 import { usageEvents, users } from '../db/schema.js'
 
 const TOGETHER_API_URL = 'https://api.together.xyz/v1/chat/completions'
-const DEFAULT_MODEL = 'Qwen/Qwen3-235B-A22B-Instruct-2507-tput'
+const DEFAULT_MODEL = 'MiniMaxAI/MiniMax-M3'
 
 const FREE_CAP = 2_000_000
 const PAID_CAP = 25_000_000
