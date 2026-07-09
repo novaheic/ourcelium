@@ -26,8 +26,8 @@ interface CompletionBody {
   model?: string
   messages: Message[]
   // Tool-calling params from the client. These MUST be forwarded upstream or
-  // the model never learns the edit/create tools exist and can only describe
-  // changes in prose instead of applying them.
+  // the model can't emit edit/create tool calls and can only describe changes
+  // in prose instead of applying them.
   tools?: unknown
   tool_choice?: unknown
   temperature?: number
